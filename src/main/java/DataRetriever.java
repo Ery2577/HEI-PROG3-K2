@@ -1,46 +1,39 @@
 import java.sql.*;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
-
 public class DataRetriever {
 
-    // ==========================================
-    // i) SAUVEGARDE DE COMMANDE AVEC STOCKS
-    // ==========================================
+    //  SAUVEGARDE DE COMMANDE AVEC STOCKS
     public Order saveOrder(Order orderToSave) {
         DBConnection dbConnection = new DBConnection();
         try (Connection conn = dbConnection.getConnection()) {
-            conn.setAutoCommit(false); // Début transaction
+            conn.setAutoCommit(false);
 
-            // 1. VÉRIFICATION DES STOCKS
             for (DishOrder dishOrder : orderToSave.getDishOrderList()) {
-                // On recharge le plat pour avoir ses ingrédients via l'ID
                 Dish dish = findDishById(dishOrder.getDish().getId());
-
                 for (DishIngredient di : dish.getDishIngredients()) {
                     double requiredQty = di.getQuantity() * dishOrder.getQuantity();
                     double currentStock = getCurrentStock(conn, di.getIngredient().getId());
 
                     if (currentStock < requiredQty) {
                         conn.rollback();
-                        // Exception demandée : message contenant l'ingrédient manquant
                         throw new RuntimeException("Stock insuffisant pour l'ingrédient : " + di.getIngredient().getName());
                     }
                 }
             }
 
-            // 2. INSERTION DE LA COMMANDE (ENTÊTE)
-            String insertOrderSql = "INSERT INTO \"order\" (id, reference, creation_datetime) VALUES (?, ?, ?)";
+            String insertOrderSql = "INSERT INTO \"order\" (id, reference, creation_datetime, status) VALUES (?, ?, ?, ?)";
             int orderId = getNextSerialValue(conn, "order", "id");
             try (PreparedStatement psOrder = conn.prepareStatement(insertOrderSql)) {
                 psOrder.setInt(1, orderId);
                 psOrder.setString(2, orderToSave.getReference());
                 psOrder.setTimestamp(3, Timestamp.from(orderToSave.getCreationDatetime()));
+                psOrder.setString(4, orderToSave.getPaymentStatus().name());
                 psOrder.executeUpdate();
             }
 
-            // 3. INSERTION DES DÉTAILS (TABLE DE LIAISON)
             String insertDetailSql = "INSERT INTO dish_order (id, id_order, id_dish, quantity) VALUES (?, ?, ?, ?)";
             try (PreparedStatement psDetail = conn.prepareStatement(insertDetailSql)) {
                 for (DishOrder doItem : orderToSave.getDishOrderList()) {
@@ -62,13 +55,12 @@ public class DataRetriever {
         }
     }
 
-    // ==========================================
-    // ii) RÉCUPÉRATION PAR RÉFÉRENCE
-    // ==========================================
+
+    // RÉCUPÉRATION PAR RÉFÉRENCE
     public Order findOrderByReference(String reference) {
         DBConnection dbConnection = new DBConnection();
         try (Connection connection = dbConnection.getConnection()) {
-            String sql = "SELECT id, reference, creation_datetime FROM \"order\" WHERE reference = ?";
+            String sql = "SELECT id, reference, creation_datetime, status FROM \"order\" WHERE reference = ?";
             try (PreparedStatement preparedStatement = connection.prepareStatement(sql)) {
                 preparedStatement.setString(1, reference);
                 try (ResultSet resultSet = preparedStatement.executeQuery()) {
@@ -78,21 +70,58 @@ public class DataRetriever {
                         order.setId(idOrder);
                         order.setReference(resultSet.getString("reference"));
                         order.setCreationDatetime(resultSet.getTimestamp("creation_datetime").toInstant());
+
+                        String status = resultSet.getString("status");
+                        if (status != null) {
+                            order.setPaymentStatus(PaymentStatusEnum.valueOf(status));
+                        }
+
                         order.setDishOrderList(findDishOrderByIdOrder(idOrder));
                         return order;
                     }
                 }
             }
-            // Exception demandée si la référence n'existe pas
             throw new RuntimeException("Commande introuvable pour la référence : " + reference);
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
     }
 
-    // ==========================================
-    // MÉTHODES DE LECTURE (FINDERS)
-    // ==========================================
+
+    // CRÉATION DE VENTE (Transformation)
+    public Sale createSaleFrom(Order order) {
+        if (order.getPaymentStatus() != PaymentStatusEnum.PAID) {
+            throw new RuntimeException("Une vente ne peut être créée que pour une commande payée.");
+        }
+
+        if (order.getSale() != null) {
+            throw new RuntimeException("Une commande ne peut être associée qu'à une vente.");
+        }
+
+        Sale newSale = new Sale();
+        newSale.setCreationDatetime(Instant.now());
+        newSale.setOrder(order);
+
+        DBConnection dbConnection = new DBConnection();
+        try (Connection conn = dbConnection.getConnection()) {
+            String sql = "INSERT INTO sale (id, creation_datetime, id_order) VALUES (?, ?, ?)";
+            int saleId = getNextSerialValue(conn, "sale", "id");
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setInt(1, saleId);
+                ps.setTimestamp(2, Timestamp.from(newSale.getCreationDatetime()));
+                ps.setInt(3, order.getId());
+                ps.executeUpdate();
+            }
+            newSale.setId(saleId);
+        } catch (SQLException e) {
+            throw new RuntimeException("Erreur lors de la création de la vente : " + e.getMessage());
+        }
+
+        order.setSale(newSale);
+        return newSale;
+    }
+
+    //MÉTHODES PRIVÉES (FINDERS ET UTILITAIRES)
     private List<DishOrder> findDishOrderByIdOrder(Integer idOrder) {
         DBConnection dbConnection = new DBConnection();
         List<DishOrder> dishOrders = new ArrayList<>();
@@ -169,9 +198,6 @@ public class DataRetriever {
         }
     }
 
-    // ==========================================
-    // LOGIQUE DE STOCK ET SÉQUENCES
-    // ==========================================
     private double getCurrentStock(Connection conn, int ingredientId) throws SQLException {
         String sql = "SELECT SUM(CASE WHEN type = 'E' THEN quantity ELSE -quantity END) FROM stock_movement WHERE id_ingredient = ?";
         try (PreparedStatement ps = conn.prepareStatement(sql)) {

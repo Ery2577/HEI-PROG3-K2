@@ -68,3 +68,13 @@ CREATE TABLE dish_order (
     CONSTRAINT fk_order FOREIGN KEY (id_order) REFERENCES "order"(id) ON DELETE CASCADE,
     CONSTRAINT fk_dish FOREIGN KEY (id_dish) REFERENCES dish(id) ON DELETE CASCADE
 );
+
+-- 1. Ajout de la colonne status à la table order
+ALTER TABLE "order" ADD COLUMN status VARCHAR(20) DEFAULT 'UNPAID';
+
+-- 2. Création de la table sale (One-To-One)
+CREATE TABLE sale (
+    id SERIAL PRIMARY KEY,
+    creation_datetime TIMESTAMP NOT NULL,
+    id_order INT UNIQUE REFERENCES "order"(id)
+);
